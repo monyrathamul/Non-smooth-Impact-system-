@@ -1,0 +1,118 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import brentq
+import warnings
+
+# Suppress brentq warnings during extreme chaotic scattering
+warnings.filterwarnings('ignore')
+
+def flight_eq(dt, tn, vn, A, w, w0, B):
+    """Implicit equation for the time of flight between impacts."""
+    zm = B + (A * np.sin(w * tn) - B) * np.cos(w0 * dt) + (vn / w0) * np.sin(w0 * dt)
+    zp = A * np.sin(w * (tn + dt))
+    return zm - zp
+
+def generate_chaotic_attractor(w, A, B, w0, e, total_bounces):
+    """Simulates the system and returns arrays for the Poincare map."""
+    t = np.zeros(total_bounces)
+    v = np.zeros(total_bounces)
+    
+    # Initial conditions
+    t[0], v[0] = 0.0, 1.0
+    dt_step = 0.01 
+    
+    for n in range(total_bounces - 1):
+        dt_curr = 1e-5
+        f_curr = flight_eq(dt_curr, t[n], v[n], A, w, w0, B)
+        
+        # Chattering clearance
+        while f_curr < 0 and dt_curr < 0.2:
+            dt_curr += dt_step
+            f_curr = flight_eq(dt_curr, t[n], v[n], A, w, w0, B)
+            
+        dt_impact = None
+        
+        # Forward scan for the next impact bracket
+        for _ in range(1500): 
+            dt_next = dt_curr + dt_step
+            f_next = flight_eq(dt_next, t[n], v[n], A, w, w0, B)
+            
+            if f_curr >= 0 and f_next < 0:
+                dt_impact = brentq(flight_eq, dt_curr, dt_next, args=(t[n], v[n], A, w, w0, B))
+                break
+                
+            dt_curr = dt_next
+            f_curr = f_next
+            
+        if dt_impact is None:
+            dt_impact = dt_step 
+            
+        t[n+1] = t[n] + dt_impact
+        
+        # Pre-impact and post-impact velocities
+        v_pre = -w0 * (A * np.sin(w * t[n]) - B) * np.sin(w0 * dt_impact) + v[n] * np.cos(w0 * dt_impact)
+        vp = A * w * np.cos(w * t[n+1])
+        v_post = (1 + e) * vp - e * v_pre
+        
+        # Chattering mitigation
+        if v_post < vp + 1e-3:
+            v_post = vp + 0.05 
+            
+        v[n+1] = v_post
+        
+    return t, v
+
+# ==========================================
+# System Parameters (Chaotic Regime)
+# ==========================================
+A = 1.0       
+B = 0.3       
+w0 = 0.50      
+e = 0.70      
+w_chaos = 2.40  # Driving frequency known to induce chaos
+
+# Data sizing
+n_transient = 2000    # Discard a larger transient to ensure convergence to the attractor
+n_steady = 200000      # Massive dataset for high-resolution fractal rendering
+total_impacts = n_transient + n_steady
+
+print(f"Simulating {total_impacts} impacts in chaotic regime (w = {w_chaos})...")
+t_data, v_data = generate_chaotic_attractor(w_chaos, A, B, w0, e, total_impacts)
+
+# ==========================================
+# Poincare Map Construction
+# ==========================================
+# 1. Slice off the transient garbage
+t_steady = t_data[n_transient:]
+v_steady = v_data[n_transient:]
+
+# 2. Calculate impact phase modulo 2*pi
+# phi_n = (w * t_n) mod 2*pi
+phi_steady = (w_chaos * t_steady) % (2 * np.pi)
+
+print("Rendering high-resolution Strange Attractor...")
+
+# ==========================================
+# Visualization Styling
+# ==========================================
+fig, ax = plt.subplots(figsize=(10, 8))
+
+# Use black dots with very low alpha and tiny size to create a density map effect
+ax.scatter(phi_steady, v_steady, 
+           s=0.4,           # Tiny marker size 
+           c='black',       # Monochromatic mapping
+           alpha=0.8,       # Transparency reveals density
+           marker='.')
+
+ax.set_title(fr"Strange Attractor Poincaré Section ($\omega = {w_chaos}$)", fontsize=14, pad=15)
+ax.set_xlabel(r"Impact Phase $\phi_n = \omega t_n pmod{2\pi}$", fontsize=12)
+ax.set_ylabel(r"Post-Impact Velocity $v_n$", fontsize=12)
+
+# Format the X-axis in multiples of pi for cleaner academic presentation
+ax.set_xlim(0, 2 * np.pi)
+ax.set_xticks([0, np.pi/2, np.pi, 3*np.pi/2, 2*np.pi])
+ax.set_xticklabels(['$0$', r'$\frac{\pi}{2}$', r'$\pi$', r'$\frac{3\pi}{2}$', r'$2\pi$'])
+
+ax.grid(True, alpha=0.2, linestyle='--')
+plt.tight_layout()
+plt.show()
