@@ -6,17 +6,15 @@ import warnings
 warnings.filterwarnings('ignore')
 
 def distance_to_platform(dt, tn, vn, A, w, w0, B):
-    """Calculates the spatial difference between the mass and platform (Spring-Loaded Model)."""
+    """Calculates the spatial difference between the mass and platform."""
     z_m = B + (A * np.sin(w * tn) - B) * np.cos(w0 * dt) + (vn / w0) * np.sin(w0 * dt)
     z_p = A * np.sin(w * (tn + dt))
     return z_m - z_p
 
-def simulate_spring_bounces(w, A, B, w0, e, n_bounces, t0=0.0, v0=2.0):
-    """Simulates impacts and calculates the peak height of every single flight."""
+def simulate_bounces(w, A, B, w0, e, n_bounces, t0=0.0, v0=2.0):
+    """Simulates the sequence of impacts and tracks the state variables."""
     t = np.zeros(n_bounces)
     v = np.zeros(n_bounces)
-    z_max_flight = np.zeros(n_bounces - 1) 
-    
     t[0] = t0
     v[0] = v0
     
@@ -52,79 +50,66 @@ def simulate_spring_bounces(w, A, B, w0, e, n_bounces, t0=0.0, v0=2.0):
             
         t[n+1] = t[n] + dt_impact
         
-        # ==========================================
-        # Exact Analytical Maximum Height (Harmonic)
-        # ==========================================
-        z_n = A * np.sin(w * t[n])
-        
-        # Amplitude of the harmonic oscillator's flight
-        amplitude = np.sqrt((z_n - B)**2 + (v[n] / w0)**2)
-        theoretical_apex = B + amplitude
-        
-        # Time required to reach the theoretical apex
-        tau_apex = (1 / w0) * np.arctan2(v[n] / w0, z_n - B)
-        
-        if tau_apex < 0:
-            tau_apex += (2 * np.pi) / w0
-            
-        # Verify if the apex occurs during the free-flight phase
-        if 0 < tau_apex < dt_impact:
-            z_max_flight[n] = theoretical_apex
-        else:
-            z_max_flight[n] = max(z_n, A * np.sin(w * t[n+1]))
-            
-        # ==========================================
-        
+        # Calculate pre-impact and platform velocities
         v_pre = -w0 * (A * np.sin(w * t[n]) - B) * np.sin(w0 * dt_impact) + v[n] * np.cos(w0 * dt_impact)
         vp = A * w * np.cos(w * t[n+1])
+        
+        # Apply momentum transfer map
         v_post = (1 + e) * vp - e * v_pre
         
+        # Chattering mitigation
         if v_post <= vp + 1e-3:
             v_post = vp + 0.05 
             
         v[n+1] = v_post
         
-    return z_max_flight
+    return t, v
 
 # ==========================================
 # System Parameters
 # ==========================================
 A = 1.0       # Platform amplitude
-B = 0.5       # Static equilibrium of the spring
-w0 = 0.50      # Natural frequency of the spring
+B = 0.3       # Static equilibrium of the spring
+w0 = 0.25      # Natural frequency of the spring
 e = 0.70      # Coefficient of restitution
 
-n_total_bounces = 600  # Total bounces to simulate per frequency
+# Iteration counts
+n_transient = 400  # Discard early bounces to allow decay to the attractor
+n_steady = 300     # Bounces to plot for the steady-state visualization
 
 # ==========================================
-# Generate Absolute Max Height Data
+# Generate Bifurcation Data
 # ==========================================
-w_vals = np.linspace(1.4, 6.4, 800) 
-absolute_max_z = []
+# Sweeping frequency over the extended requested range
+w_vals = np.linspace(1.632, 1.650, 2000) 
+bif_w = []
+bif_v = []
 
-print("Computing absolute peak heights across frequencies (this may take a moment)...")
+print("Computing extended bifurcation diagram (this may take a few minutes)...")
 for w in w_vals:
-    # 1. System is intrinsically reset for each 'w' inside the function (t0=0.0, v0=2.0)
-    # 2. Extract the entire array of maximums for all flights
-    z_max_array = simulate_spring_bounces(w, A, B, w0, e, n_total_bounces)
+    # Run the continuous impact simulation
+    t, v = simulate_bounces(w, A, B, w0, e, n_transient + n_steady)
     
-    # 3. Pull the single highest value from the ENTIRE list, including transients
-    peak_height = np.max(z_max_array)
-    absolute_max_z.append(peak_height)
+    # Store only the steady-state post-impact velocities
+    bif_w.extend([w] * n_steady)
+    bif_v.extend(v[n_transient:])
 
 print("Computation complete. Rendering plot...")
 
 # ==========================================
 # Plotting Configuration
 # ==========================================
-fig = plt.figure(figsize=(10, 6))
+fig = plt.figure(figsize=(14, 7))
 
-plt.plot(w_vals, absolute_max_z, color='darkred', linewidth=1.5)
+# Plotting with fine markers to clearly resolve the fractal structures
+plt.scatter(bif_w, bif_v, s=0.3, c='black', marker='.', alpha=0.7)
 
-plt.title(r"Absolute Maximum Flight Height ($z_{max}$) vs Driving Frequency")
+plt.title(r"Bifurcation Diagram of the Spring-Loaded Impact Oscillator")
 plt.xlabel(r"Driving Frequency $\omega$")
-plt.ylabel(r"Global Maximum Height $z_{max}$")
-plt.grid(True, alpha=0.3)
+plt.ylabel(r"Steady-State Post-Impact Velocity $v_n$")
+
+plt.xlim(1.63, 1.660)
+plt.grid(True, alpha=0.5)
 
 plt.tight_layout()
 plt.show()
