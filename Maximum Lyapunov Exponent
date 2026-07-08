@@ -1,0 +1,195 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import brentq
+import warnings
+
+warnings.filterwarnings('ignore')
+
+def distance_to_platform(dt, tn, vn, A, w, w0, B):
+    z_m = B + (A * np.sin(w * tn) - B) * np.cos(w0 * dt) + (vn / w0) * np.sin(w0 * dt)
+    z_p = A * np.sin(w * (tn + dt))
+    return z_m - z_p
+
+def compute_jacobian(tn, vn, tau, A, w, w0, B, e):
+    """Calculates the exact 2x2 analytical Jacobian matrix for the impact map."""
+    t_next = tn + tau
+    
+    # Kinematic states at impact
+    z_p_tn = A * np.sin(w * tn)
+    v_p_tn = A * w * np.cos(w * tn)
+    
+    z_p_next = A * np.sin(w * t_next)
+    v_p_next = A * w * np.cos(w * t_next)
+    a_p_next = -A * w**2 * np.sin(w * t_next)
+    
+    # Pre-impact velocity
+    v_pre = -w0 * (z_p_tn - B) * np.sin(w0 * tau) + vn * np.cos(w0 * tau)
+    
+    # Relative velocity at impact (Denominator for implicit derivatives)
+    v_rel = v_pre - v_p_next
+    
+    # Prevent division by zero during grazing bifurcations or severe chattering
+    if abs(v_rel) < 1e-6:
+        v_rel = -1e-6 if v_rel < 0 else 1e-6
+        
+    # Implicit derivatives of flight time (tau)
+    dtau_dtn = -(v_p_tn * np.cos(w0 * tau) - v_p_next) / v_rel
+    dtau_dvn = -((1.0 / w0) * np.sin(w0 * tau)) / v_rel
+    
+    # Top row of Jacobian (dt_{n+1})
+    J11 = 1.0 + dtau_dtn
+    J12 = dtau_dvn
+    
+    # Partial derivatives of pre-impact velocity
+    dvpre_dtn = -v_p_tn * w0 * np.sin(w0 * tau)
+    dvpre_dvn = np.cos(w0 * tau)
+    dvpre_dtau = -w0**2 * (z_p_next - B)
+    
+    # Bottom row of Jacobian (dv_{n+1})
+    J21 = (1 + e) * a_p_next * J11 - e * (dvpre_dtn + dvpre_dtau * dtau_dtn)
+    J22 = (1 + e) * a_p_next * J12 - e * (dvpre_dvn + dvpre_dtau * dtau_dvn)
+    
+    return np.array([[J11, J12], [J21, J22]])
+
+def simulate_lyapunov(w, A, B, w0, e, n_transient, n_steady):
+    """Simulates impacts and computes the maximal Lyapunov exponent."""
+    t = 0.0
+    v = 2.0
+    
+    dt_step = 0.05 * min(2 * np.pi / w, 2 * np.pi / w0)
+    
+    # 1. Burn-in Phase: Bypass transients
+    for n in range(n_transient):
+        dt_curr = 1e-5 
+        dist_prev = distance_to_platform(dt_curr, t, v, A, w, w0, B)
+        while dist_prev < 0 and dt_curr < 1.0:
+            dt_curr += dt_step
+            dist_prev = distance_to_platform(dt_curr, t, v, A, w, w0, B)
+
+        dt_impact = dt_step
+        for _ in range(5000): 
+            dt_next = dt_curr + dt_step
+            dist_next = distance_to_platform(dt_next, t, v, A, w, w0, B)
+            if dist_prev >= 0 and dist_next < 0:
+                try:
+                    dt_impact = brentq(distance_to_platform, dt_curr, dt_next, args=(t, v, A, w, w0, B))
+                    break
+                except ValueError:
+                    pass
+            dist_prev = dist_next; dt_curr = dt_next
+            
+        tau = dt_impact
+        t_next = t + tau
+        v_pre = -w0 * (A * np.sin(w * t) - B) * np.sin(w0 * tau) + v * np.cos(w0 * tau)
+        vp = A * w * np.cos(w * t_next)
+        v_post = (1 + e) * vp - e * v_pre
+        
+        if v_post <= vp + 1e-3: v_post = vp + 0.05 
+        
+        t = t_next
+        v = v_post
+
+    # 2. Tangent Space Evolution: Compute Lyapunov Exponent
+    # Initialize a normalized perturbation vector
+    delta_x = np.array([1.0, 0.0])
+    sum_log_growth = 0.0
+    valid_steps = 0
+    
+    for n in range(n_steady):
+        dt_curr = 1e-5 
+        dist_prev = distance_to_platform(dt_curr, t, v, A, w, w0, B)
+        while dist_prev < 0 and dt_curr < 1.0:
+            dt_curr += dt_step
+            dist_prev = distance_to_platform(dt_curr, t, v, A, w, w0, B)
+
+        dt_impact = dt_step
+        for _ in range(5000): 
+            dt_next = dt_curr + dt_step
+            dist_next = distance_to_platform(dt_next, t, v, A, w, w0, B)
+            if dist_prev >= 0 and dist_next < 0:
+                try:
+                    dt_impact = brentq(distance_to_platform, dt_curr, dt_next, args=(t, v, A, w, w0, B))
+                    break
+                except ValueError:
+                    pass
+            dist_prev = dist_next; dt_curr = dt_next
+            
+        tau = dt_impact
+        
+        # Extract the exact Jacobian matrix for this specific flight
+        J = compute_jacobian(t, v, tau, A, w, w0, B, e)
+        
+        # Advance the perturbation vector in the tangent space
+        delta_x_new = J @ delta_x
+        
+        # Measure the growth rate
+        growth_factor = np.linalg.norm(delta_x_new)
+        
+        # Prevent math domain errors on extreme singular events
+        if growth_factor > 1e-12:
+            sum_log_growth += np.log(growth_factor)
+            delta_x = delta_x_new / growth_factor  # Normalize to prevent overflow
+            valid_steps += 1
+        
+        # Advance the physical system
+        t_next = t + tau
+        v_pre = -w0 * (A * np.sin(w * t) - B) * np.sin(w0 * tau) + v * np.cos(w0 * tau)
+        vp = A * w * np.cos(w * t_next)
+        v_post = (1 + e) * vp - e * v_pre
+        
+        if v_post <= vp + 1e-3: v_post = vp + 0.05 
+        
+        t = t_next
+        v = v_post
+        
+    return sum_log_growth / valid_steps if valid_steps > 0 else 0.0
+
+# ==========================================
+# System Parameters
+# ==========================================
+A = 1.0       
+B = 0.3       
+w0 = 0.25      
+e = 0.85      
+
+n_transient = 400
+n_steady = 600
+
+# ==========================================
+# Generate Lyapunov Spectrum
+# ==========================================
+# We use a slightly lower resolution (300 points) because 
+# computing the Jacobian numerically at every step is computationally heavy.
+w_vals = np.linspace(1.4, 6.4, 400)
+lyap_vals = []
+
+print("Computing Lyapunov exponents across frequencies (this will take a few minutes)...")
+for w in w_vals:
+    le = simulate_lyapunov(w, A, B, w0, e, n_transient, n_steady)
+    lyap_vals.append(le)
+
+print("Computation complete. Rendering plot...")
+
+# ==========================================
+# Plotting Configuration
+# ==========================================
+fig = plt.figure(figsize=(10, 6))
+
+plt.plot(w_vals, lyap_vals, color='purple', linewidth=1.2)
+
+# Draw a distinct zero line. 
+# Lambda > 0 confirms chaos. Lambda < 0 indicates a stable periodic orbit.
+plt.axhline(0, color='black', linestyle='--', linewidth=1.5)
+
+plt.title(r"Maximal Lyapunov Exponent ($\lambda$) vs Driving Frequency")
+plt.xlabel(r"Driving Frequency $\omega$")
+plt.ylabel(r"Lyapunov Exponent $\lambda$")
+plt.grid(True, alpha=0.3)
+
+# Shade the chaotic regions for visual clarity
+plt.fill_between(w_vals, lyap_vals, 0, where=(np.array(lyap_vals) > 0), color='red', alpha=0.2, label='Chaotic Regime')
+plt.fill_between(w_vals, lyap_vals, 0, where=(np.array(lyap_vals) <= 0), color='blue', alpha=0.1, label='Periodic Regime')
+plt.legend(loc="upper left")
+
+plt.tight_layout()
+plt.show()
