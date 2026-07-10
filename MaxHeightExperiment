@@ -1,0 +1,143 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import brentq
+import warnings
+
+warnings.filterwarnings('ignore')
+
+def distance_to_platform(dt, tn, vn, A, w, w0, B):
+    """Calculates the spatial difference between the mass and platform (SI Units)."""
+    z_m = B + (A * np.sin(w * tn) - B) * np.cos(w0 * dt) + (vn / w0) * np.sin(w0 * dt)
+    z_p = A * np.sin(w * (tn + dt))
+    return z_m - z_p
+
+def simulate_spring_bounces(w, A, B, w0, e, n_bounces, t0=0.0, v0=0.1):
+    """Simulates impacts and extracts the absolute maximum height."""
+    t = np.zeros(n_bounces)
+    v = np.zeros(n_bounces)
+    z_max_flight = np.zeros(n_bounces - 1) 
+    
+    t[0] = t0
+    v[0] = v0
+    
+    # Adaptive time step resolving the very high frequency platform vibrations
+    dt_step = 0.05 * min(2 * np.pi / w, 2 * np.pi / w0)
+    
+    for n in range(n_bounces - 1):
+        dt_curr = 1e-6 
+        dist_prev = distance_to_platform(dt_curr, t[n], v[n], A, w, w0, B)
+        
+        # Step out if temporarily trapped (critical for B lying inside swept volume)
+        while dist_prev < 0 and dt_curr < 1.0:
+            dt_curr += dt_step
+            dist_prev = distance_to_platform(dt_curr, t[n], v[n], A, w, w0, B)
+
+        dt_impact = None
+        
+        for _ in range(20000): 
+            dt_next = dt_curr + dt_step
+            dist_next = distance_to_platform(dt_next, t[n], v[n], A, w, w0, B)
+            
+            if dist_prev >= 0 and dist_next < 0:
+                try:
+                    dt_impact = brentq(distance_to_platform, dt_curr, dt_next, 
+                                       args=(t[n], v[n], A, w, w0, B))
+                    break
+                except ValueError:
+                    pass
+            
+            dist_prev = dist_next
+            dt_curr = dt_next
+            
+        if dt_impact is None:
+            dt_impact = dt_step 
+            
+        t[n+1] = t[n] + dt_impact
+        
+        # ==========================================
+        # Exact Analytical Maximum Height Extraction
+        # ==========================================
+        z_n = A * np.sin(w * t[n])
+        
+        amplitude = np.sqrt((z_n - B)**2 + (v[n] / w0)**2)
+        theoretical_apex = B + amplitude
+        
+        tau_apex = (1 / w0) * np.arctan2(v[n] / w0, z_n - B)
+        if tau_apex < 0:
+            tau_apex += (2 * np.pi) / w0
+            
+        if 0 < tau_apex < dt_impact:
+            z_max_flight[n] = theoretical_apex
+        else:
+            z_max_flight[n] = max(z_n, A * np.sin(w * t[n+1]))
+            
+        # ==========================================
+        
+        v_pre = -w0 * (A * np.sin(w * t[n]) - B) * np.sin(w0 * dt_impact) + v[n] * np.cos(w0 * dt_impact)
+        vp = A * w * np.cos(w * t[n+1])
+        v_post = (1 + e) * vp - e * v_pre
+        
+        # Aggressive chattering mitigation for high-frequency regimes
+        if v_post <= vp + 1e-4:
+            v_post = vp + 0.01 
+            
+        v[n+1] = v_post
+        
+    return z_max_flight
+
+# ==========================================
+# Real-World Experimental Parameters (SI Units)
+# ==========================================
+m = 0.297         # Mass [kg]
+k = 61.0          # Spring constant [N/m]
+w0 = np.sqrt(k/m) # Natural angular frequency [rad/s]
+
+A = 0.001         # Platform amplitude [m] (1.00 mm)
+B = -0.0005       # Static equilibrium [m] (-0.5 mm)
+
+# NOTE: Adjust 'e' based on your physical materials (e.g., steel on steel vs steel on rubber)
+e = 0.85          
+
+n_total_bounces = 400  # Number of impacts to simulate per frequency
+
+# ==========================================
+# Generate Absolute Max Height Data
+# ==========================================
+f_vals = np.linspace(15.0, 50.0, 500)  # Frequency sweep in Hertz
+absolute_max_z = []
+
+print("Simulating experimental sweep (this may take a moment due to high frequencies)...")
+for f in f_vals:
+    w = 2 * np.pi * f  # Convert Hz to rad/s for internal physics
+    
+    # Initialize from t=0 and a small initial velocity to trigger chaos
+    z_max_array = simulate_spring_bounces(w, A, B, w0, e, n_total_bounces, t0=0.0, v0=0.1)
+    
+    # Extract global peak and convert back to millimeters
+    peak_height_mm = np.max(z_max_array) * 1000.0
+    absolute_max_z.append(peak_height_mm)
+
+print("Computation complete. Rendering plot...")
+
+# ==========================================
+# Plotting Configuration
+# ==========================================
+fig = plt.figure(figsize=(10, 6))
+
+plt.plot(f_vals, absolute_max_z, color='darkcyan', linewidth=1.5)
+
+plt.title(r"Experimental Prediction: Global Max Height vs Frequency ($A=1.0$ mm, $B=-0.5$ mm)")
+plt.xlabel(r"Driving Frequency $f$ [Hz]")
+plt.ylabel(r"Absolute Maximum Height $z_{max}$ [mm]")
+
+# Highlight the swept volume of the platform for physical context
+plt.axhline(1.0, color='gray', linestyle='--', linewidth=1.0, alpha=0.7, label='Platform Max Extension')
+plt.axhline(-1.0, color='gray', linestyle=':', linewidth=1.0, alpha=0.7, label='Platform Min Extension')
+plt.axhline(-0.5, color='red', linestyle='--', linewidth=1.0, alpha=0.5, label='Static Equilibrium (B)')
+
+plt.legend(loc='upper right')
+plt.grid(True, alpha=0.3)
+plt.xlim(15, 50)
+
+plt.tight_layout()
+plt.show()
